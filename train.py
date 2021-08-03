@@ -2,6 +2,7 @@ import argparse
 import torch
 from torch.nn import functional as F
 from torch import nn
+import torchvision
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 import cv2
@@ -9,6 +10,8 @@ import numpy as np
 import os
 import glob
 import shutil
+import pandas as pd
+import random
 from PIL import Image
 from sklearn.metrics import roc_auc_score
 from torch import nn
@@ -20,6 +23,7 @@ from sklearn.random_projection import SparseRandomProjection
 from sklearn.neighbors import NearestNeighbors
 from scipy.ndimage import gaussian_filter
 
+random.seed(0)
 
 def distance_matrix(x, y=None, p=2):  # pairwise distance of vectors
 
@@ -195,6 +199,48 @@ class MVTecDataset(Dataset):
         return img, gt, label, os.path.basename(img_path[:-4]), img_type
 
 
+class CheXpertDataset(Dataset):
+
+    def __init__(self, transform, gt_transform, phase='train') -> None:
+        super().__init__()
+        self.phase = phase
+        self.transform = transform
+        self.gt_transform = gt_transform
+        if self.phase == 'train':
+            self.base_path = '/data/matt/chexpert/'
+            self.df_path = os.path.join('/data/matt/chexpert/CheXpert-v1.0-small/normals.csv')
+            self.df = pd.read_csv(self.df_path)
+            self.files = [os.path.join(self.base_path, p) for p in self.df['Path'].values.tolist()]
+            self.files = random.sample(self.files, 32 * 5)
+            self.ground_truth = []
+        else:
+            # we only have 1 file right now lol
+            self.base_path = '/data/matt/chexpert/'
+            self.files = ['/data/matt/chexpert/CheXpert-v1.0-small/valid/patient64579/study1/view1_frontal.jpg']
+            self.ground_truth = ['//data/matt/chexpert/CheXpert-v1.0-small/valid/patient64579/study1/view1_frontal_mask.jpg']
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, index):
+        path = self.files[index]
+        img = Image.open(path).convert('RGB')
+        if self.phase == 'train':
+            img = self.transform(img)
+            gt = torch.zeros([1, img.size()[-2], img.size()[-2]])
+            label = 0
+            image_type = 'good'
+        else:
+            img = self.transform(img)
+            label = 1
+            image_type = 'consolidation'
+            gt_path = self.ground_truth[index]
+            gt = Image.open(gt_path)
+            gt = self.gt_transform(gt)
+
+        return img, gt, label, os.path.basename(path[:-4]), image_type
+
+
 def cvt2heatmap(gray):
     heatmap = cv2.applyColorMap(np.uint8(gray), cv2.COLORMAP_JET)
     return heatmap
@@ -242,8 +288,9 @@ class STPM(pl.LightningModule):
         self.init_features()
         def hook_t(module, input, output):
             self.features.append(output)
-
-        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'wide_resnet50_2', pretrained=True)
+        # https://github.com/pytorch/vision/issues/4156
+        # self.model = torch.hub.load('pytorch/vision:v0.9.0', 'wide_resnet50_2', pretrained=True)
+        self.model = torchvision.models.wide_resnet50_2(pretrained=True, progress=True)
 
         for param in self.model.parameters():
             param.requires_grad = False
@@ -300,13 +347,15 @@ class STPM(pl.LightningModule):
         cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}_gt.jpg'), gt_img)
 
     def train_dataloader(self):
-        image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train')
-        train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=0) #, pin_memory=True)
+        # image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train')
+        image_datasets = CheXpertDataset(transform=self.data_transforms, gt_transform=self.gt_transforms)
+        train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=16) #, pin_memory=True)
         return train_loader
 
     def test_dataloader(self):
-        test_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test')
-        test_loader = DataLoader(test_datasets, batch_size=1, shuffle=False, num_workers=0) #, pin_memory=True) # only work on batch_size=1, now.
+        # test_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test')
+        test_datasets = CheXpertDataset(transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test')
+        test_loader = DataLoader(test_datasets, batch_size=1, shuffle=False, num_workers=16) #, pin_memory=True) # only work on batch_size=1, now.
         return test_loader
 
     def configure_optimizers(self):
@@ -418,8 +467,8 @@ def get_args():
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=256) # 256
     parser.add_argument('--input_size', default=224)
-    parser.add_argument('--coreset_sampling_ratio', default=0.001)
-    parser.add_argument('--project_root_path', default=r'/home/changwoo/hdd/project_results/patchcore/test') # 'D:\Project_Train_Results\mvtec_anomaly_detection\210624\test') #
+    parser.add_argument('--coreset_sampling_ratio', default=0.001, type=float)
+    parser.add_argument('--project_root_path', default=r'/data/matt/chexpert/anomaly_detection/test01') # 'D:\Project_Train_Results\mvtec_anomaly_detection\210624\test') #
     parser.add_argument('--save_src_code', default=True)
     parser.add_argument('--save_anomaly_map', default=True)
     parser.add_argument('--n_neighbors', type=int, default=9)
