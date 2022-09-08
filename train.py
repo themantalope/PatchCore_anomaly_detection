@@ -211,13 +211,15 @@ class CheXpertDataset(Dataset):
             self.df_path = os.path.join('/data/matt/chexpert/CheXpert-v1.0-small/normals.csv')
             self.df = pd.read_csv(self.df_path)
             self.files = [os.path.join(self.base_path, p) for p in self.df['Path'].values.tolist()]
-            self.files = random.sample(self.files, 32 * 5)
+            self.files = random.sample(self.files, 32 * 45)
             self.ground_truth = []
         else:
             # we only have 1 file right now lol
             self.base_path = '/data/matt/chexpert/'
-            self.files = ['/data/matt/chexpert/CheXpert-v1.0-small/valid/patient64579/study1/view1_frontal.jpg']
-            self.ground_truth = ['//data/matt/chexpert/CheXpert-v1.0-small/valid/patient64579/study1/view1_frontal_mask.jpg']
+            self.df_path = os.path.join('/data/matt/chexpert/CheXpert-v1.0-small/valid_with_normals.csv')
+            self.df = pd.read_csv(self.df_path)
+            self.files = [os.path.join(self.base_path, p) for p in self.df['Path'].values.tolist()]
+            self.ground_truth = []
 
     def __len__(self):
         return len(self.files)
@@ -232,11 +234,18 @@ class CheXpertDataset(Dataset):
             image_type = 'good'
         else:
             img = self.transform(img)
-            label = 1
-            image_type = 'consolidation'
-            gt_path = self.ground_truth[index]
-            gt = Image.open(gt_path)
-            gt = self.gt_transform(gt)
+            label = int(self.df.at[index, 'Normals'])
+            # it's reversed
+            if label == 0:
+                label = 1
+            else:
+                label = 0
+            image_type = 'abnormal' if label == 1 else 'good'
+            # gt_path = self.ground_truth[index]
+            # gt = Image.open(gt_path)
+            # gt = self.gt_transform(gt)
+            gt = torch.zeros([1, img.size()[-2], img.size()[-2]])
+            gt[0,0,0] = 1.0
 
         return img, gt, label, os.path.basename(path[:-4]), image_type
 
@@ -396,6 +405,7 @@ class STPM(pl.LightningModule):
             pickle.dump(self.embedding_coreset, f)
 
     def test_step(self, batch, batch_idx): # Nearest Neighbour Search
+        print('test batch idx: ', batch_idx)
         self.embedding_coreset = pickle.load(open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'rb'))
         x, gt, label, file_name, x_type = batch
         # extract embedding
@@ -412,7 +422,7 @@ class STPM(pl.LightningModule):
         #
         #Approximately 60x performance improvement
         #tack time 1.9070019721984863 -> 0.03699636459350586
-        knn = KNN(torch.from_numpy(self.embedding_coreset).cuda(), k=9)
+        knn = KNN(torch.from_numpy(self.embedding_coreset).cuda(), k=args.n_neighbors)
         score_patches = knn(torch.from_numpy(embedding_test).cuda())[0].cpu().detach().numpy()
 
         anomaly_map = score_patches[:,0].reshape((28,28))
@@ -444,6 +454,30 @@ class STPM(pl.LightningModule):
         print('test_epoch_end')
         values = {'pixel_auc': pixel_auc, 'img_auc': img_auc}
         self.log_dict(values)
+
+        print('ground truth list: ')
+        print(self.gt_list_img_lvl)
+        print('predicted: ', )
+        print(self.pred_list_img_lvl)
+
+        for idx, (gt, pred) in enumerate(zip(self.gt_list_img_lvl, self.pred_list_img_lvl)):
+            tp = (gt == 1) and (pred == 1)
+            tn = (gt == 0) and (pred == 0)
+            fp = (gt == 1) and (pred == 0)
+            fn = (gt == 0) and (pred == 1)
+
+            outstr = '{}: {}, {}, '.format(idx, gt, pred)
+            if tp:
+                outstr = f'{outstr} true positive'
+            elif tn:
+                outstr = f'{outstr} true negative'
+            elif fp:
+                outstr = f'{outstr} false positive'
+            elif fn:
+                outstr = f'{outstr} false negative'
+            print(outstr)
+            print()
+
         # anomaly_list = []
         # normal_list = []
         # for i in range(len(self.gt_list_img_lvl)):
