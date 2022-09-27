@@ -199,6 +199,16 @@ class MVTecDataset(Dataset):
         return img, gt, label, os.path.basename(img_path[:-4]), img_type
 
 
+class CheXpert2(Dataset):
+
+    def __init__(self, csv_file) -> None:
+        super().__init__()
+        self.df = pd.read_csv(csv_file)
+
+
+    def __len__(self):
+        return self.df.shape[0]
+
 class CheXpertDataset(Dataset):
 
     def __init__(self, transform, gt_transform, phase='train') -> None:
